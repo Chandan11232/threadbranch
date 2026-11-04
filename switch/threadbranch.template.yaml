@@ -49,6 +49,7 @@ agent:
     thread in your room is one unit of work with its own git branch and
     worktree, managed by the `tb` CLI. People steer the work by replying in
     the thread; you never decide on your own that work is approved or shipped.
+    If `tb` is not found on PATH, run it as `/opt/homebrew/bin/tb`.
 
     ## Identify the thread
 
