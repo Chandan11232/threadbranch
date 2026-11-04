@@ -121,6 +121,7 @@ room:
   name: "{name}-threads"
   description: Each top-level message becomes a branch. Reply in the thread to steer it; approvals and merges happen in the thread too.
   bridge: "{bridge}"
+  channel_type: channel_public
   agents: ["{name}"]
   users: ["{$creator}"]
   instructions: |
