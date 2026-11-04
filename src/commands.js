@@ -1,17 +1,67 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { git, repoRoot, sh, TbError } from './git.js';
+import { git, repoRoot, run, sh, TbError } from './git.js';
 import { Store } from './store.js';
 import { alive, pickPort, startPreview, stop } from './preview.js';
 
 const slugify = (s) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'thread';
 const shortId = (id) => id.replace(/[^a-zA-Z0-9]/g, '').slice(-6).toLowerCase();
-const norm = (who) => String(who).trim().replace(/^@/, '').toLowerCase();
+
+/**
+ * Canonical form of a person's name: NFKC (fullwidth/compat forms fold to ASCII), invisible
+ * format characters (zero-width space/joiner, BOM, bidi marks) removed, leading @s dropped,
+ * whitespace collapsed, lowercased. Never throws, so it is safe on legacy state.
+ */
+const canon = (who) =>
+  String(who ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '').trim().replace(/^@+/, '').trim()
+    .replace(/\s+/g, ' ').toLowerCase();
+
+/** Canonical identity for a --by value; rejects empty, control characters, and absurd lengths. */
+function norm(who) {
+  const raw = String(who).normalize('NFKC').replace(/\p{Cf}/gu, '').trim();
+  if (/\p{Cc}/u.test(raw)) throw new TbError('invalid --by: control characters are not allowed in a name');
+  const s = canon(raw);
+  if (!s) throw new TbError(`invalid --by "${who}": empty name`);
+  if (s.length > 64) throw new TbError('invalid --by: name longer than 64 characters');
+  return s;
+}
+
+/**
+ * Thread ids come from the chat platform and can be anything printable. They are only ever used
+ * as a JSON key and in commit trailers, never in paths or branch names, so the one thing to
+ * reject is control characters (a newline would forge extra trailers).
+ */
+function threadId(value) {
+  const id = need(value, 'thread');
+  if (/[\p{Cc}\p{Cf}]/u.test(id)) throw new TbError('invalid --thread: control characters are not allowed');
+  if (id.length > 1024) throw new TbError('invalid --thread: longer than 1024 characters');
+  return id;
+}
+const hash = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+/** Single-line, bounded title so it can't forge extra paragraphs/trailers in commit messages. */
+const cleanTitle = (s) => s.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
 
 function need(value, name) {
-  if (value === undefined || value === true || value === '') throw new TbError(`missing --${name}`);
+  if (value === undefined || value === true || String(value).trim() === '') throw new TbError(`missing --${name}`);
   return String(value);
+}
+
+function requireOpen(t) {
+  if (t.status !== 'open') throw new TbError(`thread is ${t.status}`);
+}
+
+/** Message if the thread's worktree has been switched off its own branch, else ''. */
+function offBranch(t) {
+  const ref = git(t.worktree, ['symbolic-ref', '-q', 'HEAD'], { allowFail: true }).out;
+  return ref === `refs/heads/${t.branch}` ? '' : `worktree is not on ${t.branch} (it is on ${ref || 'a detached HEAD'})`;
+}
+
+function requireOnBranch(t) {
+  const wrong = offBranch(t);
+  if (wrong) throw new TbError(wrong);
 }
 
 export function context(cwd) {
@@ -24,17 +74,22 @@ export function context(cwd) {
 /** Find a thread by Switch thread/message id, branch key, or branch name. */
 function find(state, ref) {
   ref = need(ref, 'thread');
-  if (state.threads[ref]) return state.threads[ref];
-  const t = Object.values(state.threads).find((x) => x.key === ref || x.branch === ref || x.short === ref);
-  if (!t) throw new TbError(`no thread "${ref}". Run: tb board`);
-  return t;
+  if (Object.hasOwn(state.threads, ref)) return state.threads[ref];
+  const all = Object.values(state.threads);
+  const t = all.find((x) => x.key === ref || x.branch === ref);
+  if (t) return t;
+  const byShort = all.filter((x) => x.short === ref);
+  if (byShort.length > 1) throw new TbError(`"${ref}" matches ${byShort.length} threads; use the thread id or key`);
+  if (!byShort.length) throw new TbError(`no thread "${ref}". Run: tb board`);
+  return byShort[0];
 }
 
 const head = (t) => git(t.worktree, ['rev-parse', 'HEAD']);
 
 function quorum(t, config, sha) {
-  const valid = t.approvals.filter((a) => a.sha === sha && (config.selfApproveCounts || a.by !== norm(t.openedBy)));
-  const people = [...new Set(valid.map((a) => a.by))];
+  const opener = canon(t.openedBy);
+  const valid = t.approvals.filter((a) => a.sha === sha && (config.selfApproveCounts === true || canon(a.by) !== opener));
+  const people = [...new Set(valid.map((a) => canon(a.by)))].filter(Boolean);
   return { people, have: people.length, need: config.approvalsRequired, met: people.length >= config.approvalsRequired };
 }
 
@@ -53,7 +108,11 @@ export function init(cwd, flags) {
   const overrides = {};
   if (flags.base) overrides.base = String(flags.base);
   else overrides.base = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (flags.approvals) overrides.approvalsRequired = Number(flags.approvals);
+  if (flags.approvals !== undefined) {
+    const n = Number(flags.approvals);
+    if (!Number.isInteger(n) || n < 1) throw new TbError('--approvals must be a whole number of at least 1');
+    overrides.approvalsRequired = n;
+  }
   if (flags['no-tests']) overrides.testCommand = null;
   if (flags['no-preview']) overrides.previewCommand = null;
   if (flags.tunnel) overrides.previewTunnel = String(flags.tunnel);
@@ -65,14 +124,28 @@ export function init(cwd, flags) {
 
 export function open(cwd, flags) {
   const { root, store, config } = context(cwd);
-  const thread = need(flags.thread, 'thread');
-  const title = need(flags.title, 'title');
-  const by = need(flags.by, 'by');
-  const existing = store.load().threads[thread];
-  if (existing) return `already open: ${existing.branch}\nworktree: ${existing.worktree}`;
+  const thread = threadId(flags.thread);
+  const title = cleanTitle(need(flags.title, 'title'));
+  if (!title) throw new TbError('missing --title');
+  const by = norm(need(flags.by, 'by'));
+  const state = store.load();
+  if (Object.hasOwn(state.threads, thread)) {
+    const existing = state.threads[thread];
+    if (existing.status === 'open') return `already open: ${existing.branch}\nworktree: ${existing.worktree}`;
+    throw new TbError(`thread is ${existing.status} (${existing.branch}); start a new top-level thread for new work`);
+  }
 
-  const short = shortId(thread);
-  const key = `${slugify(title)}-${short}`;
+  const short = shortId(thread) || hash(thread).slice(0, 6);
+  const slug = slugify(title);
+  // Keys must be unique: two threads can share a title and an id tail (Slack ts ...123456).
+  const taken = (k) => Object.values(state.threads).some((x) => x.key === k) ||
+    fs.existsSync(path.join(store.worktreesDir, k)) ||
+    git(root, ['rev-parse', '--verify', '--quiet', `refs/heads/thread/${k}`], { allowFail: true }).ok;
+  let key = `${slug}-${short}`;
+  for (let i = 0; taken(key); i++) {
+    if (i >= 20) throw new TbError(`could not find a free branch name for ${slug}`);
+    key = `${slug}-${hash(`${thread}#${i}`).slice(0, 6)}-${short}`;
+  }
   const branch = `thread/${key}`;
   const worktree = path.join(store.worktreesDir, key);
   git(root, ['worktree', 'add', '-b', branch, worktree, config.base]);
@@ -81,7 +154,7 @@ export function open(cwd, flags) {
   if (fs.existsSync(nm) && !fs.existsSync(path.join(worktree, 'node_modules'))) fs.symlinkSync(nm, path.join(worktree, 'node_modules'));
   const t = {
     thread, key, short, branch, worktree, title,
-    openedBy: norm(by), openedAt: new Date().toISOString(),
+    openedBy: by, openedAt: new Date().toISOString(),
     status: 'open', approvals: [], commits: [], lastTest: null, preview: null,
     baseSha: git(root, ['rev-parse', config.base]),
   };
@@ -98,6 +171,8 @@ export function where(cwd, flags, args) {
 export function commit(cwd, flags, args) {
   const { store } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
+  requireOpen(t);
+  requireOnBranch(t);
   const msg = need(flags.m ?? flags.message, 'm');
   const by = norm(need(flags.by, 'by'));
   git(t.worktree, ['add', '-A']);
@@ -128,19 +203,29 @@ export function diff(cwd, flags, args) {
 export function test(cwd, flags, args) {
   const { store, config } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
+  requireOpen(t);
   if (!config.testCommand) return 'no test command configured; test gate is off';
   const sha = head(t);
+  // A pass on uncommitted changes says nothing about the commit, so only a clean tree is recorded.
+  const dirty = Boolean(git(t.worktree, ['status', '--porcelain']));
   const r = sh(t.worktree, config.testCommand);
-  store.update((s) => { s.threads[t.thread].lastTest = { sha, ok: r.ok, at: new Date().toISOString() }; });
-  store.audit('test', { thread: t.thread, sha, ok: r.ok });
+  // The test command must not change tracked files either, or the result isn't about `sha`.
+  // Untracked output (coverage/, junit.xml) is fine here; the merge's dirty-tree blocker still sees it.
+  const changed = !dirty && (head(t) !== sha || Boolean(git(t.worktree, ['status', '--porcelain', '--untracked-files=no'])));
+  const recorded = !dirty && !changed;
+  if (recorded) store.update((s) => { s.threads[t.thread].lastTest = { sha, ok: r.ok, at: new Date().toISOString() }; });
+  store.audit('test', { thread: t.thread, sha, ok: r.ok, recorded });
   const tail = r.out.trim().split('\n').slice(-25).join('\n');
-  return `${r.ok ? 'PASS' : 'FAIL'} ${config.testCommand} @ ${sha.slice(0, 7)}\n${tail}`;
+  const note = dirty ? '\nnote: ran on uncommitted changes, so this result was not recorded. Run tb commit, then tb test again.'
+    : changed ? '\nnote: the test command changed the worktree, so this result was not recorded.' : '';
+  return `${r.ok ? 'PASS' : 'FAIL'} ${config.testCommand} @ ${sha.slice(0, 7)}${dirty ? ' + uncommitted changes' : ''}\n${tail}${note}`;
 }
 
 export function preview(cwd, flags, args) {
   const { store, config } = context(cwd);
   const state = store.load();
   const t = find(state, flags.thread ?? args[0]);
+  requireOpen(t);
   if (!config.previewCommand) return 'previews are off (previewCommand is null)';
   if (t.preview) { stop(t.preview.pid); stop(t.preview.tunnelPid); }
   const taken = new Set(Object.values(state.threads).filter((x) => x.preview && alive(x.preview.pid) && x !== t).map((x) => x.preview.port));
@@ -158,17 +243,19 @@ export function preview(cwd, flags, args) {
 export function approve(cwd, flags, args) {
   const { store, config } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
-  if (t.status !== 'open') throw new TbError(`thread is ${t.status}`);
+  requireOpen(t);
   const by = norm(need(flags.by, 'by'));
+  // Reviewers look at the preview/worktree; if that includes uncommitted code, HEAD isn't what they saw.
+  if (git(t.worktree, ['status', '--porcelain'])) throw new TbError('the worktree has uncommitted changes; run tb commit first so the approval is for exactly what was reviewed');
   const sha = head(t);
   store.update((s) => {
     const x = s.threads[t.thread];
-    x.approvals = x.approvals.filter((a) => a.by !== by);
+    x.approvals = x.approvals.filter((a) => canon(a.by) !== by);
     x.approvals.push({ by, sha, at: new Date().toISOString() });
   });
   store.audit('approve', { thread: t.thread, by, sha });
   const q = quorum(find(store.load(), t.thread), config, sha);
-  const selfNote = !config.selfApproveCounts && by === norm(t.openedBy) ? ' (you opened this thread, so your approval does not count toward the quorum)' : '';
+  const selfNote = config.selfApproveCounts !== true && by === canon(t.openedBy) ? ' (you opened this thread, so your approval does not count toward the quorum)' : '';
   return `approval from ${by} recorded for ${sha.slice(0, 7)}${selfNote}\nquorum: ${q.have}/${q.need}${q.people.length ? ` (${q.people.join(', ')})` : ''}${q.met ? ' — ready to merge' : ''}`;
 }
 
@@ -176,28 +263,40 @@ export function unapprove(cwd, flags, args) {
   const { store } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
   const by = norm(need(flags.by, 'by'));
-  store.update((s) => { s.threads[t.thread].approvals = s.threads[t.thread].approvals.filter((a) => a.by !== by); });
-  store.audit('unapprove', { thread: t.thread, by });
-  return `approval from ${by} withdrawn`;
+  const had = t.approvals.some((a) => canon(a.by) === by);
+  store.update((s) => { s.threads[t.thread].approvals = s.threads[t.thread].approvals.filter((a) => canon(a.by) !== by); });
+  store.audit('unapprove', { thread: t.thread, by, had });
+  return had ? `approval from ${by} withdrawn` : `${by} had no approval to withdraw`;
 }
 
-/** Explain everything that blocks a merge right now; empty list means clear. */
-function blockers(t, config) {
+/**
+ * Explain everything that blocks a merge right now; empty `out` means clear. Returns the sha it
+ * checked so the caller merges that exact commit, not a HEAD re-read later.
+ */
+function blockers(t, config, root) {
   const out = [];
-  if (t.status !== 'open') out.push(`thread is ${t.status}`);
+  if (t.status !== 'open') return { out: [`thread is ${t.status}`], sha: null };
   const sha = head(t);
+  // Approvals and tests are keyed to the worktree HEAD; the merge must land exactly that commit.
+  const wrong = offBranch(t);
+  if (wrong) out.push(wrong);
   if (git(t.worktree, ['status', '--porcelain'])) out.push('uncommitted changes in the worktree (run tb commit)');
   if (!t.commits.length && git(t.worktree, ['rev-list', '--count', `${config.base}..HEAD`]) === '0') out.push('no commits on this thread yet');
   const q = quorum(t, config, sha);
   if (!q.met) out.push(`needs ${q.need} approvals on ${sha.slice(0, 7)}, has ${q.have}${q.people.length ? ` (${q.people.join(', ')})` : ''}`);
   if (config.testCommand && !(t.lastTest && t.lastTest.sha === sha && t.lastTest.ok)) out.push(`tests have not passed on ${sha.slice(0, 7)} (run tb test)`);
-  return out;
+  if (config.mergeMode !== 'pr') {
+    const current = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (current !== config.base) out.push(`main checkout is on ${current}, expected ${config.base}`);
+    if (git(root, ['status', '--porcelain'])) out.push(`main checkout ${root} has uncommitted changes`);
+  }
+  return { out, sha };
 }
 
 export function check(cwd, flags, args) {
-  const { store, config } = context(cwd);
+  const { root, store, config } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
-  const b = blockers(t, config);
+  const { out: b } = blockers(t, config, root);
   return b.length ? `blocked:\n- ${b.join('\n- ')}` : 'clear to merge';
 }
 
@@ -205,32 +304,37 @@ export function merge(cwd, flags, args) {
   const { root, store, config } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
   const by = norm(need(flags.by, 'by'));
-  const b = blockers(t, config);
-  if (b.length) {
-    store.audit('merge_refused', { thread: t.thread, by, blockers: b });
-    throw new TbError(`merge refused:\n- ${b.join('\n- ')}`);
-  }
-  const sha = head(t);
+  const { out: b, sha } = blockers(t, config, root);
+  const refuse = (reasons) => {
+    store.audit('merge_refused', { thread: t.thread, by, blockers: reasons });
+    return new TbError(`merge refused:\n- ${reasons.join('\n- ')}`);
+  };
+  if (b.length) throw refuse(b);
+  // Exactly the commit blockers() checked; never "whatever the branch points at now".
   const approvers = quorum(t, config, sha).people;
   let result;
   if (config.mergeMode === 'pr') {
-    git(t.worktree, ['push', '-u', 'origin', t.branch]);
+    const fail = (msg) => {
+      store.audit('merge_failed', { thread: t.thread, by, sha, error: msg });
+      return new TbError(msg);
+    };
+    const push = git(t.worktree, ['push', 'origin', `${sha}:refs/heads/${t.branch}`], { allowFail: true });
+    if (!push.ok) throw fail(`git push of ${t.branch} failed:\n${push.err || push.out}`);
     const body = `Opened from a team chat thread by threadbranch.\n\nRequested by: ${t.openedBy}\nApproved by: ${approvers.join(', ')}\nTests: passed on ${sha.slice(0, 7)}`;
-    const pr = sh(t.worktree, `gh pr create --base ${config.base} --head ${t.branch} --title ${JSON.stringify(t.title)} --body ${JSON.stringify(body)}`);
-    if (!pr.ok) throw new TbError(`gh pr create failed:\n${pr.out}`);
+    // Argument vectors, not a shell string: titles come from chat and must never be interpreted.
+    const pr = run(t.worktree, 'gh', ['pr', 'create', '--base', config.base, '--head', t.branch, '--title', t.title, '--body', body]);
+    if (!pr.ok) throw fail(`gh pr create failed:\n${pr.out}`);
     const url = pr.out.trim().split('\n').pop();
-    const m = sh(t.worktree, `gh pr merge ${url} --merge --delete-branch=false`);
-    if (!m.ok) throw new TbError(`PR opened at ${url} but gh pr merge failed:\n${m.out}`);
+    // --match-head-commit: refuse if anyone pushed to the branch after approval.
+    const m = run(t.worktree, 'gh', ['pr', 'merge', url, '--merge', '--delete-branch=false', '--match-head-commit', sha]);
+    if (!m.ok) throw fail(`PR opened at ${url} but gh pr merge failed:\n${m.out}`);
     result = { prUrl: url, mergeSha: null };
   } else {
-    const current = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (current !== config.base) throw new TbError(`main checkout is on ${current}, expected ${config.base}`);
-    if (git(root, ['status', '--porcelain'])) throw new TbError(`main checkout ${root} has uncommitted changes; refusing to merge`);
-    const r = git(root, ['merge', '--no-ff', '-m', `Merge thread: ${t.title}\n\nRequested-by: ${t.openedBy}\nApproved-by: ${approvers.join(', ')}\nMerged-by: ${by}\nThread: ${t.thread}`, t.branch], { allowFail: true });
+    const r = git(root, ['merge', '--no-ff', '-m', `Merge thread: ${cleanTitle(t.title)}\n\nRequested-by: ${t.openedBy}\nApproved-by: ${approvers.join(', ')}\nMerged-by: ${by}\nThread: ${t.thread}`, sha], { allowFail: true });
     if (!r.ok) {
       const conflicts = git(root, ['diff', '--name-only', '--diff-filter=U'], { allowFail: true }).out;
       git(root, ['merge', '--abort'], { allowFail: true });
-      throw new TbError(`merge conflicts with ${config.base}${conflicts ? ` in: ${conflicts.split('\n').join(', ')}` : ''}\nRun: tb sync ${t.key}, resolve, commit, test, and get fresh approvals.`);
+      throw refuse([`merge conflicts with ${config.base}${conflicts ? ` in: ${conflicts.split('\n').join(', ')}` : ''}. Run: tb sync ${t.key}, resolve, commit, test, and get fresh approvals.`]);
     }
     result = { prUrl: null, mergeSha: git(root, ['rev-parse', 'HEAD']) };
   }
@@ -246,6 +350,7 @@ export function merge(cwd, flags, args) {
 export function sync(cwd, flags, args) {
   const { store, config } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
+  requireOpen(t);
   const r = git(t.worktree, ['merge', '--no-edit', config.base], { allowFail: true });
   if (r.ok) {
     store.audit('sync', { thread: t.thread, ok: true });
@@ -262,8 +367,15 @@ export function revert(cwd, flags, args) {
   const by = norm(need(flags.by, 'by'));
   if (t.status !== 'merged') throw new TbError(`thread is ${t.status}; only merged threads can be reverted`);
   if (!t.mergeSha) throw new TbError(`merged through a PR (${t.prUrl}); revert it on GitHub`);
+  const current = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (current !== config.base) throw new TbError(`main checkout is on ${current}, expected ${config.base}; refusing to revert`);
   if (git(root, ['status', '--porcelain'])) throw new TbError('main checkout has uncommitted changes; refusing to revert');
-  git(root, ['revert', '-m', '1', '--no-edit', t.mergeSha]);
+  const rv = git(root, ['revert', '-m', '1', '--no-edit', t.mergeSha], { allowFail: true });
+  if (!rv.ok) {
+    git(root, ['revert', '--abort'], { allowFail: true });
+    store.audit('revert_failed', { thread: t.thread, by, error: rv.err || rv.out });
+    throw new TbError(`revert of ${t.mergeSha.slice(0, 7)} did not apply cleanly; nothing changed:\n${rv.err || rv.out}`);
+  }
   const sha = git(root, ['rev-parse', 'HEAD']);
   store.update((s) => Object.assign(s.threads[t.thread], { status: 'reverted', revertedBy: by, revertSha: sha }));
   store.audit('revert', { thread: t.thread, by, sha });
@@ -274,6 +386,8 @@ export function close(cwd, flags, args) {
   const { root, store } = context(cwd);
   const t = find(store.load(), flags.thread ?? args[0]);
   const by = norm(need(flags.by, 'by'));
+  // A merged or reverted thread must keep that status (revert depends on it).
+  requireOpen(t);
   if (t.preview) { stop(t.preview.pid); stop(t.preview.tunnelPid); }
   git(root, ['worktree', 'remove', '--force', t.worktree], { allowFail: true });
   store.update((s) => Object.assign(s.threads[t.thread], { status: 'closed', closedBy: by, preview: null }));

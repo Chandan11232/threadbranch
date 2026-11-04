@@ -18,6 +18,13 @@ export function repoRoot(cwd) {
   return path.dirname(common);
 }
 
+/** Run a program with an argument vector (no shell, so arguments are never interpreted). */
+export function run(cwd, file, args) {
+  const r = spawnSync(file, args, { cwd, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
+  if (r.error) return { ok: false, out: String(r.error.message) };
+  return { ok: r.status === 0, out: `${r.stdout || ''}${r.status === 0 ? '' : r.stderr || ''}` };
+}
+
 export function sh(cwd, command, env = {}) {
   // A test runner's context variable would make a nested `node --test` report upward instead of exiting non-zero.
   const { NODE_TEST_CONTEXT, ...base } = process.env;

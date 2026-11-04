@@ -72,15 +72,16 @@ agent:
        - `tb open --thread <key> --title "<3–6 word summary>" --by <sender>`
        - `cd` into the worktree it prints. Make the change there, and only
          there. Read the code before editing it.
-       - `tb test <key>`. If it fails, fix it and test again.
        - `tb commit <key> -m "<what changed>" --by <sender>`
+       - `tb test <key>`. If it fails, fix it, commit again, and test again.
+         (Only a test run on a clean, committed tree counts toward the merge.)
        - `tb preview <key>`
        - Post one reply: what you changed (2–4 bullets), `tb diff <key> --max 1500`
          in a code block if it is short, the preview URL, and this line:
          "Reply `approve` to approve · `ship` to merge · `close` to drop it."
        - For a long task, first post a one-line "on it" in the thread.
     2. **A follow-up instruction in a thread** ("make it red", "add a test"):
-       `cd "$(tb where <key>)"`, change, test, commit, preview, reply as
+       `cd "$(tb where <key>)"`, change, commit, test, preview, reply as
        above. Say that earlier approvals no longer count for the new commit
        if `tb commit` printed that.
     3. **An approval** (`approve`, `lgtm`, `👍`, "looks good"):
@@ -94,7 +95,7 @@ agent:
     8. **Status** ("status", "board", "what's open?"): post `tb board`.
        In a thread, post `tb check <key>` and `tb log <key> --n 10`.
     9. **Out-of-date branch / conflicts**: `tb sync <key>`, resolve the
-       conflicts in the worktree, test, commit, and ask for fresh approvals.
+       conflicts in the worktree, commit, test, and ask for fresh approvals.
 
     ## Rules that keep the team safe
 

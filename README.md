@@ -49,9 +49,11 @@ Without Switch there is no thread identity, no sender identity and no channel. T
 |---|---|
 | At least `approvalsRequired` (default 2) distinct people approved | No single person, or agent, ships alone |
 | Approvals are for the **current** commit | Changing code after review clears the approvals |
-| The person who opened the thread doesn't count | Nobody reviews their own request |
-| `testCommand` passed on the current commit | Green tests before merge |
-| No uncommitted changes, main checkout clean | No surprise state |
+| The person who opened the thread doesn't count | Nobody reviews their own request. Teammates who only asked for follow-up changes in the thread can still approve. |
+| `testCommand` passed on the current commit, run on a clean tree | Green tests on exactly what ships (runs with uncommitted changes aren't recorded) |
+| No uncommitted changes, worktree on its thread branch, main checkout clean and on `base` | No surprise state; the merge lands exactly the approved commit |
+
+Names are compared after normalization (case, leading `@`, Unicode compatibility forms, zero-width characters, whitespace), and empty names are rejected. An invalid `.tb/config.json`, such as `approvalsRequired: 0`, makes `tb` refuse to run instead of weakening the gate.
 
 When it refuses, it lists the blockers and the agent posts them verbatim. Every action is appended to `.tb/audit.jsonl` (see `tb log`).
 
@@ -62,7 +64,7 @@ Requirements: Node 20+, git, [Docker](https://docs.docker.com/get-started/get-do
 ```sh
 git clone https://github.com/Chandan11232/threadbranch.git && cd threadbranch
 npm link                      # puts `tb` on your PATH
-npm test                      # 6 tests: quorum, stale approvals, test gate, merge, revert, preview
+npm test                      # quorum, stale approvals, test gate, merge, revert, preview, edge cases
 scripts/setup-demo.sh ~/threadbranch-demo     # demo repo with `tb init` already run
 ```
 
@@ -115,7 +117,7 @@ Run `tb help` for flags. `<thread>` accepts the Switch thread id, the branch key
 
 - Switch doesn't pass emoji reactions to agents, so approvals are thread replies (`approve`, `ship`).
 - One agent session works through messages in order. Threads are isolated, but builds run one after another.
-- Approver identity is the sender name Switch reports to the agent. `tb` trusts what the agent passes in, and the agent's instructions forbid recording approvals for anyone but the sender. Treat this as a team workflow guard, not a security boundary.
+- Approver identity is the sender name Switch reports to the agent. `tb` trusts what the agent passes in, and the agent's instructions forbid recording approvals for anyone but the sender. Treat this as a team workflow guard, not a security boundary. Name normalization folds case, `@`, Unicode compatibility forms and zero-width characters, but not look-alike letters from other scripts (Cyrillic `а` vs Latin `a`).
 
 ## License
 
