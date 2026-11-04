@@ -60,7 +60,7 @@ When it refuses, it lists the blockers and the agent posts them verbatim. Every 
 Requirements: Node 20+, git, [Docker](https://docs.docker.com/get-started/get-docker/), [Switch Console](https://docs.switchagents.ai/switch-rooms/getting-started), and Claude Code (`claude auth login`), Codex or OpenCode.
 
 ```sh
-git clone <this repo> threadbranch && cd threadbranch
+git clone https://github.com/Chandan11232/threadbranch.git && cd threadbranch
 npm link                      # puts `tb` on your PATH
 npm test                      # 6 tests: quorum, stale approvals, test gate, merge, revert, preview
 scripts/setup-demo.sh ~/threadbranch-demo     # demo repo with `tb init` already run
