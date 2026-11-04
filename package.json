@@ -1,0 +1,16 @@
+{
+  "name": "threadbranch",
+  "version": "0.1.0",
+  "description": "Every chat thread is a git branch. A Switch agent turns team threads into worktrees, previews and quorum-gated merges.",
+  "type": "module",
+  "bin": {
+    "tb": "bin/tb.js"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
