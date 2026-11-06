@@ -4,6 +4,8 @@ import path from 'node:path';
 import { git, repoRoot, run, sh, TbError } from './git.js';
 import { Store } from './store.js';
 import { alive, pickPort, startPreview, stop } from './preview.js';
+import { AUTH_FAILED, UserStore, authenticate, login as authLogin, resolveSecret } from './auth/index.js';
+import { readPassword } from './auth/prompt.js';
 
 const slugify = (s) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'thread';
@@ -428,4 +430,121 @@ export function log(cwd, flags, args) {
     const { at, event, thread, ...rest } = r;
     return `${at} ${event} ${Object.entries(rest).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('|') : v}`).join(' ')}`;
   }).join('\n') || 'no audit entries';
+}
+
+// ---- auth: tb user add|rm, tb login, tb logout, tb whoami ----
+
+/**
+ * Auth state lives in the repository's git dir (shared by every worktree, never in the working
+ * tree, never committed): users.json (hashes + login throttle) and token (this checkout's session).
+ */
+function authPaths(cwd) {
+  const gitDir = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const dir = path.join(gitDir, 'tb-auth');
+  return { dir, usersPath: path.join(dir, 'users.json'), tokenPath: path.join(dir, 'token') };
+}
+
+function authOpts(cwd) {
+  const { usersPath } = authPaths(cwd);
+  return { store: new UserStore(usersPath), env: process.env };
+}
+
+// A password on the command line lands in shell history and `ps`; refuse it outright. These commands
+// take no flags at all, so any flag is refused, whatever it is spelled (--password=x, --pass x, -p x).
+function noPasswordArgs(flags, extra) {
+  const keys = Object.keys(flags);
+  if (extra.length || keys.some((k) => /^(p|pw|pass|passw(or)?d)(=|$)/i.test(k))) {
+    throw new TbError('passwords are never taken as arguments; type it at the prompt or pipe it on stdin');
+  }
+  if (keys.length) throw new TbError(`unknown flag --${keys[0].split('=')[0]} (this command takes none)`);
+}
+
+function readToken(tokenPath) {
+  try {
+    return fs.readFileSync(tokenPath, 'utf8').trim();
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw new TbError(`${tokenPath}: ${e.message}`);
+  }
+}
+
+function writeToken(dir, tokenPath, token) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = `${tokenPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, token + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, tokenPath);
+}
+
+const until = (claims) => new Date(claims.exp * 1000).toISOString();
+
+export async function user(cwd, flags, args) {
+  const [sub, name, ...extra] = args;
+  const usage = 'usage: tb user add <name> | tb user rm <name> | tb user unlock <name>';
+  if (!['add', 'rm', 'unlock'].includes(sub) || !name) throw new TbError(usage);
+  const { store } = authOpts(cwd);
+  if (sub === 'add') {
+    noPasswordArgs(flags, extra);
+    const created = await store.createUser(name, await readPassword(`Password for ${name}: `, { confirm: true }));
+    return `created user "${created}"`;
+  }
+  if (extra.length || Object.keys(flags).length) throw new TbError(usage);
+  if (sub === 'unlock') return `cleared failed logins and any lockout for "${await store.unlockUser(name)}"`;
+  const removed = await store.deleteUser(name);
+  // Deleting the user already invalidates their tokens; also drop this checkout's copy if it was theirs.
+  const { tokenPath } = authPaths(cwd);
+  const token = readToken(tokenPath);
+  if (token) {
+    try {
+      const claims = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8'));
+      if (claims.sub === removed) fs.rmSync(tokenPath, { force: true });
+    } catch {}
+  }
+  return `removed user "${removed}"; their tokens no longer work`;
+}
+
+export async function login(cwd, flags, args) {
+  const [name, ...extra] = args;
+  if (!name) throw new TbError('usage: tb login <name>');
+  noPasswordArgs(flags, extra);
+  const opts = authOpts(cwd);
+  // Fail on a missing or short secret before asking for a password.
+  resolveSecret(opts);
+  const { dir, tokenPath } = authPaths(cwd);
+  const token = await authLogin(name, await readPassword(`Password for ${name}: `), opts);
+  writeToken(dir, tokenPath, token);
+  const claims = authenticate(token, opts);
+  return `logged in as ${claims.sub} until ${until(claims)}`;
+}
+
+export async function logout(cwd) {
+  const opts = authOpts(cwd);
+  const { tokenPath } = authPaths(cwd);
+  const token = readToken(tokenPath);
+  if (!token) return 'not logged in';
+  try {
+    resolveSecret(opts);
+  } catch (e) {
+    // Without a usable secret the token cannot be verified or revoked; still let the user drop it.
+    fs.rmSync(tokenPath, { force: true });
+    throw new TbError(`removed the local token, but could not revoke it: ${e.message}`);
+  }
+  let claims;
+  try {
+    claims = authenticate(token, opts);
+  } catch (e) {
+    if (!(e instanceof TbError) || e.message !== AUTH_FAILED) throw e;
+  }
+  if (claims) await opts.store.revokeTokens(claims.sub);
+  fs.rmSync(tokenPath, { force: true });
+  return claims
+    ? `logged out ${claims.sub}; every token issued to ${claims.sub} is revoked`
+    : 'removed a token that was already invalid, expired or revoked';
+}
+
+export function whoami(cwd) {
+  const opts = authOpts(cwd);
+  const token = readToken(authPaths(cwd).tokenPath);
+  if (!token) throw new TbError('not logged in. Run: tb login <name>');
+  const claims = authenticate(token, opts);
+  return `${claims.sub} (token valid until ${until(claims)})`;
 }

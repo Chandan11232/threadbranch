@@ -7,7 +7,7 @@
     "tb": "bin/tb.js"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test --test-timeout=120000 test/"
   },
   "engines": {
     "node": ">=20"

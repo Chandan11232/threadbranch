@@ -109,11 +109,54 @@ tb init --approvals 2                 # or --no-tests, --no-preview, --pr, --tun
 ```
 tb init | open | where | commit | diff | test | preview | approve | unapprove
    check | merge | sync | revert | close | board | log
+tb user add | user rm | user unlock | login | logout | whoami
 ```
 
 Run `tb help` for flags. `<thread>` accepts the Switch thread id, the branch key (`validate-email-k3j9a1`) or the branch name.
 
+## Auth
+
+`tb` has local logins backed by signed tokens (HS256 JWTs). No extra dependencies, and `tb init` is not required.
+
+**Secret.** Login commands need `TB_JWT_SECRET`, at least 32 bytes. There is no default. Generate one with:
+
+```sh
+export TB_JWT_SECRET="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")"
+```
+
+Keep it out of the repo. Changing it invalidates every token issued so far.
+
+**Commands.**
+
+```
+tb user add <name>   create a login; asks for the password twice (or reads one line from stdin)
+tb user rm <name>    delete a login; its tokens stop working
+tb user unlock <name>  clear failed logins and any lockout for a login
+tb login <name>      check the password and store a token for this checkout
+tb whoami            print who is logged in and until when
+tb logout            revoke every token of the logged-in user and forget the local one
+```
+
+Passwords are typed at a hidden prompt, or read from the first line of stdin when it is not a terminal (`tb login sam < pwfile`, with `pwfile` mode `0600`). They are never accepted as arguments, because arguments end up in shell history and `ps`. Usernames are case-insensitive (`a-z 0-9 . _ -`, up to 64). Passwords need at least 8 characters, and can be at most 1024 bytes.
+
+**Tokens.** A token lasts 1 hour. It is rejected once it expires, after `tb logout` (which revokes all of that user's tokens, on every checkout), or after `tb user rm`. Re-creating a deleted user does not bring old tokens back. Every rejection gives the same message: `not authenticated: invalid, expired or revoked token`. Set `TB_DEBUG=1` to also print the specific reason.
+
+**Lockout.** Five failed logins in a row lock the name for 1 minute. Each further failure after that doubles the lock, up to 24 hours. A successful login resets the count, and the count is forgotten after 24 hours of quiet. While locked, `tb login` fails with the usual `invalid username or password` without checking the password, so guesses during a lock reveal nothing. Unknown names are throttled exactly like real ones. Anyone who can run `tb login` can lock out a name this way. That's the trade-off of a lockout. `tb user unlock <name>` clears it.
+
+**Files.** Everything lives in the repository's git directory, shared by all its worktrees and never committed:
+
+- `.git/tb-auth/users.json` holds scrypt password hashes with a salt per user, plus login-throttle state. Mode `0600`.
+- `.git/tb-auth/token` holds the current token. Mode `0600`. It is shared by every worktree of the repository: logging in from one worktree logs in all of them, and `tb logout` logs out all of them.
+
+Writes go through a lockfile (`users.json.lock`), so concurrent `tb` processes won't lose updates in normal use. A lock left by a crashed process is cleared automatically.
+
+**Trust model.** This guards a shared checkout against casual misuse. It is not a security boundary against anyone who can run `tb` in the repository, or otherwise write `.git/tb-auth/`. Such a person can add users or edit the file directly, which is why `tb user add`/`rm` need no login. It also means they can become anyone: `tb user rm sam && tb user add sam` followed by `tb login sam` works. So `tb whoami` identifies a user only among people who cannot write `.git/tb-auth/`. Don't treat it as proof of identity against anyone else.
+
+Logging in writes `.git/tb-auth/users.json` (to count attempts), so it needs write access there. A read-only store refuses every login.
+
 ## Limits
+
+- The login lockout table is bounded (1,000 names). An attacker who can make thousands of attempts can push a lock record out, so treat the lockout as rate limiting, not a guarantee.
 
 - Switch doesn't pass emoji reactions to agents, so approvals are thread replies (`approve`, `ship`).
 - One agent session works through messages in order. Threads are isolated, but builds run one after another.
