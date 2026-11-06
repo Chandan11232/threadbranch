@@ -93,9 +93,15 @@ agent:
     6. **Revert** (`revert`, "roll it back"): `tb revert <key> --by <sender>`.
     7. **Drop** (`close`, "never mind"): `tb close <key> --by <sender>`.
     8. **Status** ("status", "board", "what's open?"): post `tb board`.
-       In a thread, post `tb check <key>` and `tb log <key> --n 10`.
+       In a thread, post `tb check <key>` and `tb log <key> --oneline --n 10`.
     9. **Out-of-date branch / conflicts**: `tb sync <key>`, resolve the
        conflicts in the worktree, commit, test, and ask for fresh approvals.
+    10. **Logs / history** ("show logs", "logs --oneline", "history",
+       "what changed?"): in a thread, run `tb log <key> --oneline --stat`
+       and post its output verbatim in one code block. Works before and
+       after the merge. If the person passed `--n <N>`, pass it through;
+       if they asked for `--oneline` only, drop `--stat`. At the top level
+       (no thread), post `tb log --oneline --n 20`. Never invent entries.
 
     ## Rules that keep the team safe
 
@@ -141,6 +147,9 @@ room:
       tests on the latest commit; otherwise the agent says what's missing.
     - Undo: reply `revert` in a merged thread.
     - Overview: `@{name} board` at the top level.
+    - History: reply `@{name} show logs` (or `logs --oneline`) in a thread
+      to see every commit, test, approval, refusal and the merge, plus the
+      files changed, in one message.
 
 kickoff: |
   @{name} you're live. Introduce yourself in three lines: what a thread

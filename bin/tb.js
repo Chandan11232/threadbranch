@@ -19,7 +19,7 @@ const HELP = `tb — every chat thread is a git branch
   tb revert  <thread> --by <person>                          revert a merged thread on base
   tb close   <thread> --by <person>                          abandon a thread (branch kept)
   tb board                                                   every thread and its state
-  tb log     [thread] [--n 30]                               audit trail
+  tb log     [thread] [--n 30] [--oneline] [--stat]          audit trail; --oneline is chat-sized, --stat adds files changed
 
   tb user add <name>                                         create a login (password prompted, or piped on stdin)
   tb user rm  <name>                                         delete a login and revoke its tokens

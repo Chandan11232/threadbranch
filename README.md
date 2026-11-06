@@ -103,6 +103,24 @@ tb init --approvals 2                 # or --no-tests, --no-preview, --pr, --tun
 5. Sam replies `ship`. **Refused:** 1/2 approvals. Lee replies `approve`, then `ship`. **Merged.**
 6. Someone posts `@tb board` at the top level to show both threads and their states.
 7. Bonus: reply `revert` in the merged thread and it's undone in one message.
+8. In the merged thread, reply `@tb show logs`. The agent posts the whole story of the thread in one message:
+
+```
+thread/fix-submit-button-3d-k3j9a1 · merged into main as 64180c5 · opened by priya · times UTC
+11-06 17:01  opened by priya · "Fix submit button + 3D burst" → thread/fix-submit-button-3d-k3j9a1
+11-06 17:03  commit  93b7d5d by priya · Fix submit handler and add 3D burst
+11-06 17:03  test    93b7d5d PASS
+11-06 17:05  approve 93b7d5d by sam
+11-06 17:06  ship refused by sam · needs 2 approvals on 93b7d5d, has 1 (sam)
+11-06 17:08  approve 93b7d5d by lee
+11-06 17:09  MERGED  93b7d5d by lee into main as 64180c5 · approved by sam, lee
+
+files changed:
+ index.html | 42 ++++++++++++++++++++++++++++++++++++++----
+ burst.js   | 61 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+```
+
+`@tb logs --oneline` gives the timeline without the file list. At the top level, `@tb show logs` lists recent events from every thread.
 
 ## CLI reference
 
@@ -111,6 +129,8 @@ tb init | open | where | commit | diff | test | preview | approve | unapprove
    check | merge | sync | revert | close | board | log
 tb user add | user rm | user unlock | login | logout | whoami
 ```
+
+`tb log <thread> --oneline` prints one readable line per event (open, commit, test, approve, refused ship, merge, revert), and `--stat` adds the files the thread changed. Plain `tb log` keeps the raw audit format.
 
 Run `tb help` for flags. `<thread>` accepts the Switch thread id, the branch key (`validate-email-k3j9a1`) or the branch name.
 

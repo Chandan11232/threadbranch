@@ -418,18 +418,78 @@ export function board(cwd) {
   return lines.join('\n');
 }
 
-export function log(cwd, flags, args) {
-  const { store } = context(cwd);
-  const ref = flags.thread ?? args[0];
-  let rows = store.readAudit();
-  if (ref) {
-    const t = find(store.load(), ref);
-    rows = rows.filter((r) => r.thread === t.thread);
+const short7 = (sha) => (sha ? String(sha).slice(0, 7) : '-------');
+const oneLine = (s, max = 72) => {
+  const text = String(s ?? '').replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
+
+/** One readable line per audit event, short enough for a chat message on a phone. */
+function describe(r, config) {
+  const by = r.by ? ` by ${r.by}` : '';
+  switch (r.event) {
+    case 'open': return `opened${by} · "${oneLine(r.title, 60)}" → ${r.branch}`;
+    case 'commit': return `commit  ${short7(r.sha)}${by} · ${oneLine(r.msg)}`;
+    case 'test': return `test    ${short7(r.sha)} ${r.ok ? 'PASS' : 'FAIL'}${r.recorded === false ? ' (not recorded: uncommitted or changed tree)' : ''}`;
+    case 'preview': return `preview ${r.ready ? r.url : `did not come up (${r.url})`}`;
+    case 'approve': return `approve ${short7(r.sha)}${by}`;
+    case 'unapprove': return `unapprove${by}${r.had ? '' : ' (had none)'}`;
+    case 'merge_refused': return `ship refused${by} · ${(r.blockers || []).map((b) => oneLine(b, 60)).join('; ')}`;
+    case 'merge_failed': return `ship failed${by} · ${oneLine(r.error)}`;
+    case 'merge': return r.prUrl
+      ? `MERGED  ${short7(r.sha)}${by} via ${r.prUrl} · approved by ${(r.approvers || []).join(', ')}`
+      : `MERGED  ${short7(r.sha)}${by} into ${config.base} as ${short7(r.mergeSha)} · approved by ${(r.approvers || []).join(', ')}`;
+    case 'sync': return r.ok ? `sync    brought ${config.base} in` : `sync    conflicts: ${oneLine(String(r.conflicts || '').split('\n').join(', '))}`;
+    case 'revert': return `REVERTED${by} on ${config.base} as ${short7(r.sha)}`;
+    case 'revert_failed': return `revert failed${by} · ${oneLine(r.error)}`;
+    case 'close': return `closed${by}`;
+    default: {
+      const { at, event, thread, ...rest } = r;
+      return `${event} ${Object.entries(rest).map(([k, v]) => `${k}=${oneLine(Array.isArray(v) ? v.join('|') : v, 40)}`).join(' ')}`;
+    }
   }
-  return rows.slice(-Number(flags.n ?? 30)).map((r) => {
-    const { at, event, thread, ...rest } = r;
-    return `${at} ${event} ${Object.entries(rest).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('|') : v}`).join(' ')}`;
-  }).join('\n') || 'no audit entries';
+}
+
+/** Files the thread changed: the merge itself once merged, else the branch against where it forked. */
+function threadStat(root, t) {
+  const range = t.mergeSha ? [`${t.mergeSha}^1`, t.mergeSha] : [`${t.baseSha || 'HEAD'}...${t.branch}`];
+  const r = git(root, ['diff', '--stat', '--stat-width=72', ...range], { allowFail: true });
+  // git() trims, which strips the first stat line's indent; put it back so the columns line up.
+  return r.ok && r.out ? ` ${r.out}` : 'no file changes';
+}
+
+export function log(cwd, flags, args) {
+  const { root, store, config } = context(cwd);
+  // `tb log --oneline <thread>`: the bare flag parser hands the thread to the flag, so take it back.
+  const flagRef = [flags.oneline, flags.stat].find((v) => typeof v === 'string');
+  const ref = flags.thread ?? args[0] ?? flagRef;
+  const state = store.load();
+  let rows = store.readAudit();
+  const t = ref ? find(state, ref) : null;
+  if (flags.stat && !t) throw new TbError('--stat needs a thread: tb log <thread> --stat');
+  if (t) rows = rows.filter((r) => r.thread === t.thread);
+  rows = rows.slice(-Number(flags.n ?? 30));
+
+  if (!flags.oneline && !flags.stat) {
+    return rows.map((r) => {
+      const { at, event, thread, ...rest } = r;
+      return `${at} ${event} ${Object.entries(rest).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('|') : v}`).join(' ')}`;
+    }).join('\n') || 'no audit entries';
+  }
+
+  const when = (at) => String(at).slice(5, 16).replace('T', ' ');
+  const keyOf = (id) => (Object.hasOwn(state.threads, id) ? state.threads[id].key : oneLine(id, 24));
+  const lines = rows.map((r) => `${when(r.at)}  ${t ? '' : `[${keyOf(r.thread)}] `}${describe(r, config)}`);
+  const out = [];
+  if (t) {
+    const where = t.status === 'merged' ? (t.prUrl ? ` · ${t.prUrl}` : ` into ${config.base} as ${short7(t.mergeSha)}`) : '';
+    out.push(`${t.branch} · ${t.status}${where} · opened by ${t.openedBy} · times UTC`);
+  }
+  out.push(lines.join('\n') || 'no audit entries');
+  if (flags.stat) {
+    out.push('', 'files changed:', threadStat(root, t));
+  }
+  return out.join('\n');
 }
 
 // ---- auth: tb user add|rm, tb login, tb logout, tb whoami ----
