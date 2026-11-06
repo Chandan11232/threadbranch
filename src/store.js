@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { TbError } from './git.js';
 
 export const DEFAULT_CONFIG = {
   base: 'main',
@@ -43,11 +44,24 @@ export class Store {
   }
 
   config() {
-    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(this.configPath, 'utf8')) };
+    const c = { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(this.configPath, 'utf8')) };
+    // Fail closed: a typo here must not silently weaken or disable the merge gate.
+    if (!Number.isInteger(c.approvalsRequired) || c.approvalsRequired < 1) {
+      throw new TbError(`${this.configPath}: approvalsRequired must be a whole number of at least 1`);
+    }
+    if (typeof c.selfApproveCounts !== 'boolean') throw new TbError(`${this.configPath}: selfApproveCounts must be true or false`);
+    if (c.testCommand !== null && (typeof c.testCommand !== 'string' || !c.testCommand.trim())) {
+      throw new TbError(`${this.configPath}: testCommand must be a command string or null`);
+    }
+    if (!['merge', 'pr'].includes(c.mergeMode)) throw new TbError(`${this.configPath}: mergeMode must be "merge" or "pr"`);
+    return c;
   }
 
   load() {
-    return JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
+    // Null prototype: thread ids like "__proto__" or "constructor" are plain keys, not inherited members.
+    state.threads = Object.assign(Object.create(null), state.threads);
+    return state;
   }
 
   save(state) {

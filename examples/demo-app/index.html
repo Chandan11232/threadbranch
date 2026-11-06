@@ -24,9 +24,24 @@
   <script>
     document.getElementById('f').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const res = await fetch('/signup', { method: 'POST', body: new URLSearchParams(new FormData(e.target)) });
-      const data = await res.json();
-      document.getElementById('out').textContent = data.ok ? `Welcome, ${data.welcome}!` : data.errors.join(' · ');
+      const out = document.getElementById('out');
+      const button = e.target.querySelector('button');
+      if (location.protocol === 'file:') {
+        out.textContent = 'Open this page through the server (npm start, then http://localhost:3000), not as a file.';
+        return;
+      }
+      button.disabled = true;
+      out.textContent = 'Signing up…';
+      try {
+        const res = await fetch('/signup', { method: 'POST', body: new URLSearchParams(new FormData(e.target)) });
+        const data = await res.json().catch(() => null);
+        if (!data) throw new Error(`server replied ${res.status} ${res.statusText}`);
+        out.textContent = data.ok ? `Welcome, ${data.welcome}!` : data.errors.join(' · ');
+      } catch (err) {
+        out.textContent = `Sign up failed: ${err.message}`;
+      } finally {
+        button.disabled = false;
+      }
     });
   </script>
 </body>
