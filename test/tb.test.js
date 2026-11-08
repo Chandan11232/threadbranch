@@ -110,3 +110,45 @@ test('preview serves the thread worktree on its own port', () => {
   const after = spawnSync('curl', ['-s', '--max-time', '2', url], { encoding: 'utf8' });
   assert.notEqual(after.status, 0, 'preview should stop when the thread closes');
 });
+
+test('log --oneline --stat tells the whole thread story in chat-sized lines', () => {
+  ok(repo, 'open', '--thread', 'evt_LOG001', '--title', 'Fix submit button + 3D burst', '--by', 'priya');
+  const wt = ok(repo, 'where', 'evt_LOG001');
+  fs.writeFileSync(path.join(wt, 'burst.js'), 'export const burst = () => "boom";\n');
+  ok(repo, 'commit', 'evt_LOG001', '-m', 'Fix submit handler\nand add 3D burst', '--by', 'priya');
+  ok(repo, 'test', 'evt_LOG001');
+  ok(repo, 'approve', 'evt_LOG001', '--by', 'sam');
+  assert.equal(run(repo, 'merge', 'evt_LOG001', '--by', 'sam').code, 2);
+  ok(repo, 'approve', 'evt_LOG001', '--by', 'lee');
+  ok(repo, 'merge', 'evt_LOG001', '--by', 'lee');
+
+  const out = ok(repo, 'log', 'evt_LOG001', '--oneline', '--stat');
+  const lines = out.split('\n');
+  assert.match(lines[0], /^thread\/fix-submit-button-3d-burst-log001 · merged into main as [0-9a-f]{7} · opened by priya/);
+  assert.match(out, /opened by priya · "Fix submit button \+ 3D burst"/);
+  assert.match(out, /commit {2}[0-9a-f]{7} by priya · Fix submit handler and add 3D burst\n/, 'multi-line messages stay on one line');
+  assert.match(out, /test {4}[0-9a-f]{7} PASS/);
+  assert.match(out, /approve [0-9a-f]{7} by sam/);
+  assert.match(out, /ship refused by sam · needs 2 approvals/);
+  assert.match(out, /MERGED {2}[0-9a-f]{7} by lee into main as [0-9a-f]{7} · approved by (sam, lee|lee, sam)/);
+  assert.match(out, /files changed:\n burst\.js \| 1 \+\n 1 file changed/);
+  assert.doesNotMatch(out, /evt_LOG001|=/, 'no raw ids or key=value noise');
+
+  // Flag before the thread, and --n, both work; --oneline alone has no file list.
+  const short = ok(repo, 'log', '--oneline', 'evt_LOG001', '--n', '2');
+  assert.equal(short.split('\n').length, 3);
+  assert.doesNotMatch(short, /files changed/);
+  // Top level: every thread, tagged by key.
+  assert.match(ok(repo, 'log', '--oneline'), /\[fix-submit-button-3d-burst-log001\] MERGED/);
+  assert.match(run(repo, 'log', '--stat').out, /--stat needs a thread/);
+});
+
+test('log --stat on an open thread lists the branch changes so far', () => {
+  ok(repo, 'open', '--thread', 'evt_LOG002', '--title', 'Open one', '--by', 'sam');
+  const wt = ok(repo, 'where', 'evt_LOG002');
+  assert.match(ok(repo, 'log', 'evt_LOG002', '--stat'), /· open · opened by sam[\s\S]*files changed:\nno file changes/);
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'a\n');
+  ok(repo, 'commit', 'evt_LOG002', '-m', 'add a', '--by', 'sam');
+  assert.match(ok(repo, 'log', 'evt_LOG002', '--stat'), /a\.txt \| 1 \+/);
+  ok(repo, 'close', 'evt_LOG002', '--by', 'sam');
+});

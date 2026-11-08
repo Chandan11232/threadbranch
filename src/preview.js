@@ -41,8 +41,14 @@ function startDetached(cwd, command, env, logFile) {
 }
 
 function portFree(port) {
-  // Synchronous check: try to bind in a child node process.
-  const r = spawnSync(process.execPath, ['-e', `const s=require('net').createServer();s.once('error',()=>process.exit(1));s.listen(${port},'127.0.0.1',()=>s.close(()=>process.exit(0)))`]);
+  // Synchronous check in a child node process. Binding only 127.0.0.1 can succeed even while a dev
+  // server holds the port on the wildcard address (::/0.0.0.0), so try both, then probe with a connect.
+  const script = `const net=require('net');
+const bind=(host)=>new Promise((ok,no)=>{const s=net.createServer();s.once('error',no);s.listen(${port},host,()=>s.close(ok));});
+const probe=(host)=>new Promise((ok)=>{const c=net.connect(${port},host);c.on('connect',()=>{c.destroy();ok(true)});c.on('error',()=>ok(false));});
+(async()=>{try{await bind(undefined);await bind('127.0.0.1');}catch{process.exit(1)}
+if(await probe('127.0.0.1')||await probe('::1'))process.exit(1);process.exit(0);})();`;
+  const r = spawnSync(process.execPath, ['-e', script]);
   return r.status === 0;
 }
 
