@@ -590,12 +590,18 @@ test('PR mode passes a chat title to gh as one literal argument, never through a
   repos.push(bare);
   spawnSync('git', ['init', '-q', '--bare', bare]);
   g(repo, 'remote', 'add', 'origin', bare);
+  g(repo, 'push', '-q', 'origin', 'main');
   const bin = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tb-edge-bin-')));
   repos.push(bin);
   const argvLog = path.join(bin, 'argv.jsonl');
   fs.writeFileSync(path.join(bin, 'gh'), `#!${process.execPath}
 require('fs').appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');
 if (process.argv[3] === 'create') console.log('https://github.com/acme/app/pull/7');
+// Like GitHub: merging the PR moves the remote base to the approved commit.
+if (process.argv[3] === 'merge') {
+  const a = process.argv.slice(2);
+  require('child_process').execFileSync('git', ['push', '-q', 'origin', a[a.indexOf('--match-head-commit') + 1] + ':refs/heads/main']);
+}
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
   const tb = (...args) => {
@@ -611,7 +617,13 @@ if (process.argv[3] === 'create') console.log('https://github.com/acme/app/pull/
   tb('commit', 'evt_R2PR', '-m', 'pr change', '--by', 'priya');
   tb('approve', 'evt_R2PR', '--by', 'sam');
   tb('test', 'evt_R2PR');
-  assert.match(tb('merge', 'evt_R2PR', '--by', 'sam'), /pull\/7/);
+  const merged = tb('merge', 'evt_R2PR', '--by', 'sam');
+  assert.match(merged, /pull\/7/);
+  assert.match(merged, /local main updated from origin/);
+  assert.equal(g(repo, 'rev-parse', 'main'), state(repo).threads.evt_R2PR.commits[0].sha, 'local main must follow the merged PR');
+  // The next thread starts from what GitHub has, so it already contains the merged change.
+  tb('open', '--thread', 'evt_R2PR2', '--title', 'next', '--by', 'lee');
+  assert.match(fs.readFileSync(path.join(tb('where', 'evt_R2PR2'), 'validate.js'), 'utf8'), /\/\/ pr\n/);
 
   for (const dir of [repo, wt, bin]) for (const f of ['PWNED', 'PWNED2', 'PWNED3']) assert.ok(!fs.existsSync(path.join(dir, f)), `${f} created in ${dir}`);
   const calls = fs.readFileSync(argvLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l));

@@ -92,7 +92,7 @@ tb init --approvals 2                 # or --no-tests, --no-preview, --pr, --tun
 | `testCommand` | `npm test` | `null` turns off the test gate |
 | `previewCommand` | `npm start` | started with `PORT` set; `null` turns previews off |
 | `previewTunnel` | `none` | `cloudflared` gives each preview a public `trycloudflare.com` URL teammates can open |
-| `mergeMode` | `merge` | `pr` pushes the branch and merges through a GitHub PR with `gh` |
+| `mergeMode` | `merge` | `pr` pushes the branch and merges through a GitHub PR with `gh`, then fast-forwards the local base from `origin` (new threads also start from `origin`'s base). Revert PR merges on GitHub. |
 
 ## Demo script (for the video)
 

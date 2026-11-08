@@ -102,6 +102,21 @@ function exclude(root) {
   if (missing.length) fs.appendFileSync(file, `${text.endsWith('\n') || !text ? '' : '\n'}${missing.join('\n')}\n`);
 }
 
+/**
+ * PR mode merges on GitHub, so the local base falls behind. Fast-forward it from origin when the
+ * main checkout is on base and clean; never merge, reset or touch anything else. Returns '' on
+ * success, else a one-line note saying why the local base was left alone.
+ */
+function updateLocalBase(root, config) {
+  const f = git(root, ['fetch', '-q', 'origin', config.base], { allowFail: true });
+  if (!f.ok) return `could not fetch ${config.base} from origin (${(f.err || f.out).split('\n')[0]}); local ${config.base} not updated`;
+  const current = git(root, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFail: true }).out;
+  if (current !== config.base) return `main checkout is on ${current}, so local ${config.base} was not updated; run git pull there`;
+  if (git(root, ['status', '--porcelain'], { allowFail: true }).out) return `main checkout has uncommitted changes, so local ${config.base} was not updated; run git pull there`;
+  const ff = git(root, ['merge', '-q', '--ff-only', 'FETCH_HEAD'], { allowFail: true });
+  return ff.ok ? '' : `local ${config.base} has commits that are not on origin, so it was not updated; reconcile it with git pull`;
+}
+
 // ---------------------------------------------------------------- commands
 
 export function init(cwd, flags) {
@@ -150,6 +165,8 @@ export function open(cwd, flags) {
   }
   const branch = `thread/${key}`;
   const worktree = path.join(store.worktreesDir, key);
+  // In PR mode merges happen on GitHub; start from the latest base there, not a stale local copy.
+  const stale = config.mergeMode === 'pr' ? updateLocalBase(root, config) : '';
   git(root, ['worktree', 'add', '-b', branch, worktree, config.base]);
   // Share installed dependencies so previews and tests run without a fresh install.
   const nm = path.join(root, 'node_modules');
@@ -162,7 +179,7 @@ export function open(cwd, flags) {
   };
   store.update((s) => { s.threads[thread] = t; });
   store.audit('open', { thread, branch, by: t.openedBy, title });
-  return `opened ${branch}\nworktree: ${worktree}\nWork ONLY inside that directory for this thread.`;
+  return `opened ${branch}\nworktree: ${worktree}\nWork ONLY inside that directory for this thread.${stale ? `\nnote: ${stale}` : ''}`;
 }
 
 export function where(cwd, flags, args) {
@@ -330,7 +347,7 @@ export function merge(cwd, flags, args) {
     // --match-head-commit: refuse if anyone pushed to the branch after approval.
     const m = run(t.worktree, 'gh', ['pr', 'merge', url, '--merge', '--delete-branch=false', '--match-head-commit', sha]);
     if (!m.ok) throw fail(`PR opened at ${url} but gh pr merge failed:\n${m.out}`);
-    result = { prUrl: url, mergeSha: null };
+    result = { prUrl: url, mergeSha: null, localNote: updateLocalBase(root, config) || null };
   } else {
     const r = git(root, ['merge', '--no-ff', '-m', `Merge thread: ${cleanTitle(t.title)}\n\nRequested-by: ${t.openedBy}\nApproved-by: ${approvers.join(', ')}\nMerged-by: ${by}\nThread: ${t.thread}`, sha], { allowFail: true });
     if (!r.ok) {
@@ -345,7 +362,7 @@ export function merge(cwd, flags, args) {
   store.update((s) => Object.assign(s.threads[t.thread], { status: 'merged', mergedBy: by, mergedAt: new Date().toISOString(), preview: null, ...result }));
   store.audit('merge', { thread: t.thread, by, approvers, sha, ...result });
   return result.prUrl
-    ? `merged via PR ${result.prUrl}\napproved by ${approvers.join(', ')}`
+    ? `merged via PR ${result.prUrl}\napproved by ${approvers.join(', ')}\n${result.localNote ? `note: ${result.localNote}` : `local ${config.base} updated from origin`}`
     : `merged ${t.branch} into ${config.base} as ${result.mergeSha.slice(0, 7)}\napproved by ${approvers.join(', ')}\nundo with: tb revert ${t.key}`;
 }
 
